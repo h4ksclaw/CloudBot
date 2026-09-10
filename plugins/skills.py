@@ -1,9 +1,10 @@
-SKILLS_URL = "https://github.com/h4ks-com/CloudBot/tree/main/skills"
-
 from cloudbot import hook
 
 
 @hook.command(autohelp=False)
-async def skills():
+def skills(bot):
     """- returns the github url for the skills folder"""
-    return SKILLS_URL
+    repo_link = bot.config.get(
+        "repo_link", "https://github.com/h4ks-com/CloudBot"
+    )
+    return f"{repo_link}/tree/main/skills"
