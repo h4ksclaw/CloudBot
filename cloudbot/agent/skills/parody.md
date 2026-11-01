@@ -1,5 +1,6 @@
 ---
 name: parody
+agents: [wf]
 description: Make a song parody (new lyrics sung in the original voice, optional karaoke video, optional radio play) with the paid `parody` job on workflows.h4ks.com. THE DEFAULT for any "parody", "change the lyrics of", "make X sing about Y" request.
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: workflows
+agents: [wf]
 description: Run paid jobs on workflows.h4ks.com (songs, covers, voices, images, sprite sheets, 3D models, animated 3D characters, karaoke, podcasts, parodies, MIDI) and build on their results. Use it for ANY request that makes media for a user, and for anything that reuses a finished job's files, like "show that model", "play that song in a page", "make a game with my character", "put the sprite sheet in a game", "what did job 87 make". Read it before touching a workflows result, even when the request looks simple.
 ---
 

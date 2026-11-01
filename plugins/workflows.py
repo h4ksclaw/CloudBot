@@ -4,13 +4,20 @@ import logging
 from typing import Annotated, Any, Literal
 
 import httpx
+from agents import Agent
 
 from cloudbot import hook
+from cloudbot.agent.common import recent_chat_snippet
+from cloudbot.agent.registry import build_custom_tools
+from cloudbot.agent.skills import skill_index
+from cloudbot.agent.subagent import SubagentError, run_subagent
+from cloudbot.agent.tools.mcp_servers import build_mcp_tools
 from cloudbot.bot import CloudBot
 from cloudbot.clients.irc import IrcClient
 from cloudbot.event import CommandEvent
 from cloudbot.hook import Arg
-from cloudbot.util import workflows
+from cloudbot.util import async_util, workflows
+from cloudbot.util.ai_common import format_reply_lines
 from cloudbot.webhooks.handlers import register_webhook_handler
 
 logger = logging.getLogger("cloudbot")
@@ -67,7 +74,7 @@ def _format_job(client: workflows.WorkflowsClient, job: workflows.Job) -> str:
 
 def _cmd_help(client: workflows.WorkflowsClient) -> list[str]:
     usage = [
-        (".agi <what you want>", "run a workflow"),
+        (".wf run <what you want>", "run a workflow"),
         (".wf queue", "see what is running and in line"),
         (".wf status [id]", "check a job, your latest by default"),
         (".wf link", "connect your IRC account to your wallet"),
@@ -260,6 +267,48 @@ def _cmd_radio(
     return f"{SHARE_HINTS[outcome.reason]} {_dim('·')} {outcome.url}"
 
 
+WORKFLOWS_AGENT = "wf"
+WORKFLOWS_INSTRUCTIONS = """You run paid jobs on workflows.h4ks.com for the person who asked, \
+and nothing else. Check the Skills list below first and follow a matching skill with read_skill. \
+Otherwise list the job types and their params schema with the workflows tools, then call \
+workflows_submit_job(type, params). Pass links the user gave straight into the params. When the \
+submit returns a filled form link, give them that exact link and tell them to open it, log in and \
+press submit. Never poll: the bot announces the start and the result in the channel itself. When \
+no job type fits the request, say so in one line. Reply in one or two short plain lines and never \
+write a URL you did not get from a tool."""
+
+
+def _workflows_agent(bot: CloudBot) -> Agent:
+    tools = [
+        t
+        for t in build_custom_tools() + build_mcp_tools(bot)
+        if t.name.startswith("workflows_") or t.name == "read_skill"
+    ]
+    return Agent(
+        name="WorkflowsRunner",
+        instructions=WORKFLOWS_INSTRUCTIONS + skill_index(WORKFLOWS_AGENT, bot),
+        tools=tools,
+    )
+
+
+async def _cmd_run(bot: CloudBot, event: CommandEvent, request: str) -> None:
+    cfg = (bot.config.get("plugins") or {}).get("workflows_agent") or {}
+    try:
+        answer = await run_subagent(
+            bot,
+            agent=_workflows_agent(bot),
+            prompt=recent_chat_snippet(event.conn, event.chan or "") + request,
+            max_turns=int(cfg.get("max_turns", 12)),
+            timeout_s=float(cfg.get("timeout_s", 300)),
+            context=event,
+            settings=cfg,
+        )
+    except SubagentError as e:
+        event.reply(f"workflows agent failed: {e}")
+        return
+    event.reply(*format_reply_lines(answer))
+
+
 @hook.command("wf", "workflows", autohelp=False)
 def wf_cmd(
     nick: str,
@@ -268,10 +317,13 @@ def wf_cmd(
     bot: CloudBot,
     event: CommandEvent,
     sub: Annotated[
-        Literal["queue", "status", "me", "link", "cover", "continue"] | None,
+        Literal["run", "queue", "status", "me", "link", "cover", "continue"]
+        | None,
         Arg("What to do, see the list with no argument"),
     ] = None,
-    rest: Annotated[str | None, Arg("Job id, or seconds and idea")] = None,
+    rest: Annotated[
+        str | None, Arg("What to run, a job id, or seconds and idea")
+    ] = None,
 ):
     """follow workflows or cover the radio"""
     client = _client(bot)
@@ -281,6 +333,13 @@ def wf_cmd(
     rest = rest or ""
 
     match sub:
+        case "run" if rest.strip():
+            async_util.run_coroutine_threadsafe(
+                _cmd_run(bot, event, rest.strip()), bot.loop
+            )
+            return "on it"
+        case "run":
+            return "usage: .wf run <what you want>"
         case "status":
             return _cmd_status(client, rest, nick, conn)
         case "queue":

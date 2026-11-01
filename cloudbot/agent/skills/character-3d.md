@@ -1,5 +1,6 @@
 ---
 name: character-3d
+agents: [wf]
 description: Make an animated, rigged 3D character (GLB) with the paid `character-3d` job on workflows.h4ks.com. THE DEFAULT for any "3D character", "animated character", "rigged model" or "make this picture a 3D character" request.
 ---
 

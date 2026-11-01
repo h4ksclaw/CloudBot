@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from cloudbot.agent import skills
 from cloudbot.util import workflows
 from cloudbot.util.colors import strip_irc
 from cloudbot.util.command_args import CommandArgError, build_spec
@@ -46,8 +47,38 @@ def _wf(monkeypatch, client, **overrides):
 def test_wf_help_lists_commands_only(monkeypatch):
     client = _mock_client(lambda request: httpx.Response(500))
     result = [strip_irc(line) for line in _run("", **_wf(monkeypatch, client))]
-    assert any(line.startswith(".agi <what you want>") for line in result)
+    assert any(line.startswith(".wf run <what you want>") for line in result)
     assert not any("song" in line for line in result)
+
+
+def test_wf_run_agent_holds_only_workflows_tools_and_skills(monkeypatch):
+    named = [SimpleNamespace(name=n) for n in ("web_fetch", "read_skill")]
+    remote = [
+        SimpleNamespace(name=n)
+        for n in ("workflows_list_job_types", "ytdl_download_media")
+    ]
+    monkeypatch.setattr(
+        "plugins.workflows.build_custom_tools",
+        lambda: [*named, SimpleNamespace(name="workflows_submit_job")],
+    )
+    monkeypatch.setattr("plugins.workflows.build_mcp_tools", lambda bot: remote)
+    monkeypatch.setattr("plugins.workflows.skill_index", lambda agent, bot: "")
+    agent = wf_plugin._workflows_agent(MagicMock())
+    assert sorted(t.name for t in agent.tools) == [
+        "read_skill",
+        "workflows_list_job_types",
+        "workflows_submit_job",
+    ]
+
+
+def test_the_workflows_skills_are_offered_to_wf_run():
+    index = skills.skill_index(wf_plugin.WORKFLOWS_AGENT)
+    offered = {
+        line[2:].split(":")[0]
+        for line in index.splitlines()
+        if line.startswith("- ")
+    }
+    assert offered == {"workflows", "parody", "character-3d"}
 
 
 @pytest.mark.parametrize(

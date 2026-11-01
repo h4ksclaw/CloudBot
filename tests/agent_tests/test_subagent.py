@@ -73,6 +73,16 @@ async def test_an_unpinned_subagent_follows_the_active_backend(ran):
 
 
 @pytest.mark.asyncio
+async def test_following_the_agent_ignores_a_model_meant_for_another_backend(
+    ran,
+):
+    bot = _bot()
+    backends.set_active(bot, "claude")
+    await _run(bot, {"backend": "agent", "model": "glm-5.3"})
+    assert ran[0].model == "claude-haiku-5-5"
+
+
+@pytest.mark.asyncio
 async def test_a_pinned_backend_that_does_not_exist_fails(ran):
     with pytest.raises(subagent.SubagentError, match="not configured"):
         await _run(_bot(), {"backend": "gpt9"})
