@@ -40,9 +40,6 @@ MAX_USER_HISTORY_LENGTH = 10
 MODEL_SIZE_LIMIT_BYTES = 16 * 1024**3
 STT_DEFAULT_MODEL = "audio-cpp-qwen3-asr"
 MODEL_CONFIGS_TTL_S = 3600
-# CrowdSec bans a client that requests many distinct pages in a burst, and every model
-# has its own config-json URL, so we fetch them no faster than CrowdSec's leak rate.
-CONFIG_FETCH_INTERVAL_S = 0.6
 IMAGE_DEFAULT_SIZE = "512x512"
 # Usecase flags that mark a model as NOT a pure chat LLM. Embedding models also
 # advertise FLAG_CHAT, so they must be excluded here or they leak into the chat list.
@@ -54,8 +51,8 @@ _NON_CHAT_FLAGS = {
     "FLAG_EMBEDDINGS",
     "FLAG_RERANK",
 }
-# Inference backends treated as chat-capable LLM runtimes.
-_CHAT_BACKENDS = {"llama-cpp", "vulkan-llama-cpp"}
+# Every llama.cpp build LocalAI ships (vulkan, cuda12, development) has this in its name.
+_CHAT_BACKEND_MARK = "llama-cpp"
 
 logger = logging.getLogger("cloudbot")
 
@@ -95,7 +92,7 @@ def _model_is_allowed(api_url: str, headers: dict, mid: str, cfg: dict) -> bool:
         return False
     if usecases & _NON_CHAT_FLAGS:
         return False
-    if cfg.get("backend") not in _CHAT_BACKENDS:
+    if _CHAT_BACKEND_MARK not in (cfg.get("backend") or ""):
         return False
 
     try:
@@ -146,9 +143,7 @@ def _fetch_model_configs(base: str, headers: dict) -> dict[str, dict]:
     )
     response.raise_for_status()
     configs: dict[str, dict] = {}
-    for index, model in enumerate(response.json()["data"]):
-        if index:
-            time.sleep(CONFIG_FETCH_INTERVAL_S)
+    for model in response.json()["data"]:
         cfg = _get_config_json(base, headers, model["id"])
         if cfg is not None:
             configs[model["id"]] = cfg
@@ -235,6 +230,23 @@ def _warm_model_configs(api_url: str, api_key: str | None) -> None:
         _model_configs(api_url, api_key)
     except (requests.RequestException, _RateLimited, KeyError, ValueError) as e:
         logger.warning("[ollama] could not load model configs: %s", e)
+
+
+@hook.command("reloadai", permissions=["botcontrol"], autohelp=False)
+def reload_ai(bot: CloudBot) -> str:
+    """- Fetch LocalAI's model list now. Owner only."""
+    api_url, api_key = get_ollama_config(bot)
+    if not api_url:
+        return "Error: the Ollama plugin is not configured"
+    base = api_url.rstrip("/")
+    headers = {"apikey": api_key} if api_key else {}
+    try:
+        configs = _fetch_model_configs(base, headers)
+    except (requests.RequestException, _RateLimited, KeyError, ValueError) as e:
+        return f"Error: could not fetch models: {e}"
+    with _model_configs_lock:
+        _model_configs_cache[base] = (time.monotonic(), configs)
+    return f"Loaded {len(configs)} models from LocalAI."
 
 
 def _fetch_image_models(api_url: str, api_key: str | None) -> list[str]:
@@ -847,8 +859,7 @@ def ai_stt_command(
 
 # Audio understanding. The clip goes through ffmpeg here, so LocalAI only ever
 # receives a short 16 kHz mono WAV, whatever format the URL served.
-LISTEN_MODELS = ("qwen2.5-omni-7b", "qwen3-omni-30b-a3b-instruct")
-LISTEN_DEFAULT_MODEL = LISTEN_MODELS[0]
+LISTEN_DEFAULT_MODEL = "qwen2.5-omni-7b"
 LISTEN_MAX_SECONDS = 300
 LISTEN_MAX_DOWNLOAD_BYTES = 60 * 1024**2
 LISTEN_FFMPEG_TIMEOUT_S = 60
@@ -876,6 +887,19 @@ LISTEN_GLOBAL_LIMITS = [
 
 class AudioError(Exception):
     """A message for the user about audio we could not fetch, decode or hear."""
+
+
+def _fetch_listen_models(api_url: str, api_key: str | None) -> list[str]:
+    """Chat models with a multimodal projector. LocalAI has no flag for audio input,
+    so vision-only models are listed too and answer an audio clip with an error."""
+    _, configs = _model_configs(api_url, api_key)
+    return [
+        mid
+        for mid, cfg in configs.items()
+        if cfg.get("mmproj")
+        and "FLAG_CHAT" in (cfg.get("known_usecases") or [])
+        and _CHAT_BACKEND_MARK in (cfg.get("backend") or "")
+    ]
 
 
 def listen_model(bot) -> str:
@@ -1076,18 +1100,20 @@ def listen_command(
 @hook.command("listenmodel", permissions=["botcontrol"], autohelp=False)
 def listen_model_command(
     bot: CloudBot,
-    model: Annotated[
-        str | None,
-        Arg("Model .listen uses for everyone", choices=LISTEN_MODELS),
-    ] = None,
+    model: Annotated[str | None, Arg("Model .listen uses for everyone")] = None,
 ) -> str:
     """Show or set the model .listen and the agent use to hear audio."""
+    api_url, api_key = get_ollama_config(bot)
+    if not api_url:
+        return "Error: the Ollama plugin is not configured"
+    try:
+        models = _fetch_listen_models(api_url, api_key)
+    except (requests.RequestException, _RateLimited, KeyError, ValueError) as e:
+        return f"Error: could not fetch models: {e}"
     if not model:
-        return f".listen uses '{listen_model(bot)}'. Choose from: {', '.join(LISTEN_MODELS)}"
-    if model not in LISTEN_MODELS:
-        return (
-            f"Unknown model '{model}'. Choose from: {', '.join(LISTEN_MODELS)}"
-        )
+        return f".listen uses '{listen_model(bot)}'. Choose from: {', '.join(models)}"
+    if model not in models:
+        return f"Unknown model '{model}'. Choose from: {', '.join(models)}"
     bot.config.setdefault("plugins", {}).setdefault("ollama", {})[
         "listen_model"
     ] = model
