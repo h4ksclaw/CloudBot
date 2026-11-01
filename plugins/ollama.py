@@ -47,6 +47,7 @@ _NON_CHAT_FLAGS = {
     "FLAG_IMAGE",
     "FLAG_TTS",
     "FLAG_TRANSCRIPT",
+    "FLAG_VISION",
     "FLAG_EMBEDDING",
     "FLAG_EMBEDDINGS",
     "FLAG_RERANK",
@@ -530,35 +531,19 @@ def ai_clear_command(nick: str, chan: str) -> str:
 
 
 @hook.command("aimodels", autohelp=False)
-def ai_models_command(bot: CloudBot, event: CommandEvent) -> list[str] | str:
-    """- List the Ollama models."""
+def ai_models_command(bot: CloudBot, event: CommandEvent) -> str | None:
+    """- List the text models .ai can use."""
     api_url, api_key = get_ollama_config(bot)
     if not api_url:
         event.notice(
             "Ollama plugin not configured. Please set 'plugins.ollama.api_url' in config."
         )
         return None
-
-    tags_url = f"{api_url.rstrip('/')}/v1/models"
-
-    headers = {}
-    if api_key:
-        headers["apikey"] = api_key
-
     try:
-        response = get_session().get(tags_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        models = response.json()["data"]
-        all_names = [m["id"] for m in models]
         allowed = _fetch_allowed_models(api_url, api_key)
-        return [
-            f"Available models: {', '.join(all_names)}",
-            f"Allowed chat models (backend=llama-cpp, weights ≤{MODEL_SIZE_LIMIT_BYTES // (1024**3)} GB): {', '.join(allowed)}",
-        ]
-    except requests.HTTPError as e:
+    except (requests.RequestException, _RateLimited, KeyError, ValueError) as e:
         return f"Error fetching models: {e}"
-    except requests.Timeout:
-        return "Error: Request timed out"
+    return f"Text models: {', '.join(allowed)}"
 
 
 @hook.command("aisetmodel", "aimodel", "setaimodel", autohelp=False)
@@ -890,16 +875,19 @@ class AudioError(Exception):
 
 
 def _fetch_listen_models(api_url: str, api_key: str | None) -> list[str]:
-    """Chat models with a multimodal projector. LocalAI has no flag for audio input,
-    so vision-only models are listed too and answer an audio clip with an error."""
+    """llama.cpp chat models that also transcribe, which means their projector hears audio.
+    Speech models that also speak (FLAG_TTS) answer in voice, so we leave them out."""
     _, configs = _model_configs(api_url, api_key)
-    return [
-        mid
-        for mid, cfg in configs.items()
-        if cfg.get("mmproj")
-        and "FLAG_CHAT" in (cfg.get("known_usecases") or [])
-        and _CHAT_BACKEND_MARK in (cfg.get("backend") or "")
-    ]
+    listen_models = []
+    for mid, cfg in configs.items():
+        usecases = set(cfg.get("known_usecases") or [])
+        if (
+            {"FLAG_CHAT", "FLAG_TRANSCRIPT"} <= usecases
+            and "FLAG_TTS" not in usecases
+            and _CHAT_BACKEND_MARK in (cfg.get("backend") or "")
+        ):
+            listen_models.append(mid)
+    return listen_models
 
 
 def listen_model(bot) -> str:
