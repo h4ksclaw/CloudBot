@@ -20,6 +20,8 @@ import requests
 from agents import RunContextWrapper
 from sqlalchemy.exc import SQLAlchemyError
 
+from cloudbot.util.http import ua_cloudbot
+
 logger = logging.getLogger("cloudbot")
 
 _T = TypeVar("_T")
@@ -279,6 +281,32 @@ def safe_tool(fn: ToolInvoke) -> ToolInvoke:
             return f"(tool error: {type(e).__name__}: {sanitise_err_message(str(e))[:200]})"
 
     return wrapped
+
+
+def download(
+    url: str, max_bytes: int, max_seconds: float = 60
+) -> requests.Response:
+    """GET ``url`` and stop at ``max_bytes`` or ``max_seconds``, raising ValueError.
+
+    Returns a response whose body is already read, so ``content`` and
+    ``iter_content`` replay it from memory.
+    """
+    deadline = time.monotonic() + max_seconds
+    with requests.get(
+        url, timeout=30, stream=True, headers={"User-Agent": ua_cloudbot}
+    ) as resp:
+        resp.raise_for_status()
+        body = bytearray()
+        for chunk in resp.iter_content(64 * 1024):
+            body += chunk
+            if len(body) > max_bytes:
+                raise ValueError(
+                    f"it is over the {max_bytes // 1_000_000} MB limit"
+                )
+            if time.monotonic() > deadline:
+                raise ValueError(f"it took over {max_seconds:g}s to download")
+    resp._content = bytes(body)
+    return resp
 
 
 async def run_in_executor(

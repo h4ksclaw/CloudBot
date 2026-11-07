@@ -6,9 +6,9 @@ import logging
 from pathlib import Path
 
 import requests
-from markitdown import MarkItDown
+from markitdown import MarkItDown, MarkItDownException
 
-from cloudbot.agent.common import run_in_executor
+from cloudbot.agent.common import download, run_in_executor
 from cloudbot.agent.registry import tool
 from cloudbot.agent.zai_search_client import (
     SearchError,
@@ -27,6 +27,13 @@ _MARKDOWN_TEMPLATE_PATH = (
 )
 
 _md = MarkItDown()
+_PAGE_MAX_BYTES = 20_000_000
+
+
+def _page_text(url: str) -> str:
+    return (
+        _md.convert_response(download(url, _PAGE_MAX_BYTES)).text_content or ""
+    ).strip()
 
 
 def upload_markdown_paste(text: str, title: str = "Response") -> str:
@@ -46,36 +53,66 @@ def upload_markdown_paste(text: str, title: str = "Response") -> str:
     return str(web.paste(html.encode("utf-8"), ext="html"))
 
 
+_FETCH_CAP = 40_000
+
+
 @tool(
     name="web_fetch",
-    description="Fetch a URL and return its content as plain text/markdown. Use for reading articles, docs, GitHub pages, or any link shared in chat.",
+    description=(
+        "Fetch a URL and return its content as plain text/markdown, up to 40000 chars per "
+        "call. Use for reading articles, docs, GitHub pages, or any link shared in chat. "
+        "A longer page says TRUNCATED with its total size: call again with the offset it "
+        "names to read the rest before you summarise or quote the whole thing."
+    ),
     schema={
         "type": "object",
         "properties": {
             "url": {
                 "type": "string",
                 "description": "URL to fetch (must start with http:// or https://)",
-            }
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Char offset to continue a truncated page (default 0)",
+            },
         },
         "required": ["url"],
     },
 )
 async def web_fetch(ctx, data):
     url = str(data.get("url") or "").strip()
+    offset = max(0, int(data.get("offset") or 0))
     if not url:
         return "(error: url required)"
     if not url.startswith(("http://", "https://")):
         return "(error: url must start with http:// or https://)"
 
     try:
-        result = await run_in_executor(_md.convert, url)
-        text = (result.text_content or "").strip()
-    except (requests.RequestException, OSError, ValueError, RuntimeError) as e:
+        text = await run_in_executor(_page_text, url)
+    except (
+        requests.RequestException,
+        OSError,
+        ValueError,
+        MarkItDownException,
+    ) as e:
         return f"(error fetching {url}: {e})"
 
     if not text:
         return "(no text content extracted)"
-    return text[:4000]
+    return page_of(text, offset)
+
+
+def page_of(text: str, offset: int) -> str:
+    chunk = text[offset : offset + _FETCH_CAP]
+    end = offset + len(chunk)
+    if offset == 0 and end >= len(text):
+        return chunk
+    more = (
+        f"call web_fetch again with offset={end} to continue"
+        if end < len(text)
+        else "end of page"
+    )
+    return f"TRUNCATED chars {offset}-{end} of {len(text)} ({more})\n{chunk}"
 
 
 @tool(
@@ -164,9 +201,13 @@ async def paste_markdown(ctx, data):
 def _fetch_excerpt(url: str, limit: int) -> tuple[str, str]:
     """MarkItDown extracts text from a URL; returns (text, error). Runs in a thread."""
     try:
-        result = _md.convert(url)
-        text = (result.text_content or "").strip()
-    except (requests.RequestException, OSError, ValueError, RuntimeError) as e:
+        text = _page_text(url)
+    except (
+        requests.RequestException,
+        OSError,
+        ValueError,
+        MarkItDownException,
+    ) as e:
         return "", f"(fetch failed: {e})"
     if not text:
         return "", "(no text extracted)"

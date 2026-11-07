@@ -15,6 +15,7 @@ import logging
 import requests
 
 from cloudbot.agent.common import (
+    download,
     fetch_github_username,
     run_in_executor,
     split_repo,
@@ -335,6 +336,11 @@ async def create_github_branch(ctx, data):
 
 
 _SHRINK_THRESHOLD = 0.6
+_SOURCE_MAX_BYTES = 1_000_000
+
+
+def _download_text(url: str) -> str:
+    return download(url, _SOURCE_MAX_BYTES).content.decode("utf-8")
 
 
 @tool(
@@ -342,6 +348,9 @@ _SHRINK_THRESHOLD = 0.6
     description=(
         "Create or overwrite a file in a GitHub repo on the given branch. "
         "Provide the COMPLETE new file content — this is a full replacement, not a patch. "
+        "To commit a file that already exists online (a gist, a paste, a raw file), pass its "
+        "raw URL as source_url and leave content out: the bot downloads it and commits the "
+        "exact bytes, at any length, so never retype or summarise a document into content. "
         "Auto-fetches blob SHA, so you do NOT need to supply it (optional sha override). "
         "ALWAYS read_github_file FULLY first (paginate with offset if truncated) before editing. "
         "Always create_github_branch before editing. "
@@ -364,6 +373,10 @@ _SHRINK_THRESHOLD = 0.6
                 "type": "string",
                 "description": "Complete new file content",
             },
+            "source_url": {
+                "type": "string",
+                "description": "Raw URL whose text becomes the file, in place of content",
+            },
             "message": {"type": "string", "description": "Commit message"},
             "branch": {"type": "string", "description": "Branch to commit to"},
             "sha": {
@@ -375,7 +388,7 @@ _SHRINK_THRESHOLD = 0.6
                 "description": "Bypass shrink guard (default false). Only set true for intentional rewrites.",
             },
         },
-        "required": ["repo", "path", "content", "branch"],
+        "required": ["repo", "path", "branch"],
     },
     wrap_errors=True,
     is_github=True,
@@ -391,8 +404,14 @@ async def edit_github_file(ctx, data):
     branch = str(data.get("branch") or "main").strip()
     sha = str(data.get("sha") or "").strip()
     force_shrink = bool(data.get("force_shrink"))
+    source_url = str(data.get("source_url") or "").strip()
+    if source_url:
+        try:
+            content = await run_in_executor(_download_text, source_url)
+        except (requests.RequestException, ValueError) as e:
+            return f"(error downloading {source_url}: {e})"
     if not repo or not path or not content:
-        return "(error: repo, path, and content required)"
+        return "(error: repo, path, and content or source_url required)"
     owner, repo_name = split_repo(repo)
 
     async def fetch_probe() -> tuple[str, int]:
